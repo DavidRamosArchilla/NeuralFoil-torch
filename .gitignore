@@ -12,6 +12,7 @@ svg-inkscape/
 ~*.*
 *.csv
 training_data.zip
+build
 
 ## Core latex/pdflatex auxiliary files:
 *.aux
