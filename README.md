@@ -1,4 +1,5 @@
->  This a fork of Neuralfoil to give support on GPU by using torch.
+> This a fork of Neuralfoil to give support on GPU by using torch.
+> GPU does not seems to make neuralfoil faster, but torch does. Moreover, if the number of threads is set to 1 with `torch.set_num_threads(1)` it works a bit faster
 -----
 
 <p align="center">
