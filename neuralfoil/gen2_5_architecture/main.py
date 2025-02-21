@@ -1,5 +1,6 @@
 import aerosandbox as asb
 import aerosandbox.numpy as np
+import torch
 from typing import Union, Dict, Set, List, Iterable
 from pathlib import Path
 import re
@@ -10,13 +11,78 @@ nn_weights_dir = Path(__file__).parent / "nn_weights_and_biases"
 bl_x_points = Data.bl_x_points
 
 
-def _sigmoid(x: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
-    return 1 / (1 + np.exp(-x))
+def _sigmoid(x: Union[float, torch.Tensor]) -> Union[float, torch.Tensor]:
+    return 1 / (1 + torch.exp(-x))
 
 
-def _inverse_sigmoid(x: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
-    return -np.log(1 / x - 1)
+def _inverse_sigmoid(x: Union[float, torch.Tensor]) -> Union[float, torch.Tensor]:
+    return -torch.log(1 / x - 1)
 
+class AeroNet:
+    def __init__(self, data: Dict[str, np.ndarray], device: torch.device = 'cpu'):
+        """
+        Initialize the network by loading weights and biases once
+        
+        Args:
+            data: Dictionary containing the weights and biases
+            device: torch.device to use (CPU or GPU)
+        """
+        # Determine network structure
+        try:
+            self.layer_indices: List[int] = sorted(list(set([
+                int(key.split(".")[1])
+                for key in data.keys()
+            ])))
+        except TypeError:
+            raise ValueError(
+                f"Got an unexpected neural network file format.\n"
+                f"Dictionary keys should be strings of the form 'net.0.weight', 'net.0.bias', 'net.2.weight', etc.'.\n"
+                f"Instead, got keys of the form {data.keys()}.\n"
+            )
+        
+        # Pre-load all weights and biases to GPU
+        self.weights = []
+        self.biases = []
+        self.device = device
+        
+        for i in self.layer_indices:
+            w = torch.tensor(data[f"net.{i}.weight"], dtype=torch.float32, device=device)
+            b = torch.tensor(data[f"net.{i}.bias"], dtype=torch.float32, device=device)
+            self.weights.append(w)
+            self.biases.append(b)
+    
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Evaluates the raw network on the device
+        
+        Args:
+            x: Input tensor of shape (N_cases x N_inputs)
+            
+        Returns:
+            Output tensor of shape (N_cases x N_outputs)
+        """
+        x = x.t()
+        
+        for i, (w, b) in enumerate(zip(self.weights, self.biases)):
+            x = torch.mm(w, x) + b.unsqueeze(1)
+            
+            # Don't apply activation on last layer
+            if i < len(self.weights) - 1:
+                x = x * torch.sigmoid(x)  # SwishAKASiLU activation
+        
+        return x.t()
+    
+    def to(self, device: torch.device):
+        """
+        Moves the network to a new device
+        
+        Args:
+            device: torch.device to use (CPU or GPU)
+        """
+        self.device = device
+        for i in range(len(self.weights)):
+            self.weights[i] = self.weights[i].to(device)
+            self.biases[i] = self.biases[i].to(device)
 
 ### For speed, pre-loads parameters with statistics about the training distribution
 # Includes the mean, covariance, and inverse covariance of training data in the input latent space (25-dim)
@@ -36,13 +102,12 @@ _allowable_model_sizes: set[str] = set(
         for path in _nn_parameter_files
     ]
 )
-_nn_parameters: dict[str, dict[str, np.ndarray]] = {
-    model_size: dict(np.load(nn_weights_dir / f"nn-{model_size}.npz"))
+_neural_nets: dict[str, dict[str, np.ndarray]] = {
+    model_size: AeroNet(np.load(nn_weights_dir / f"nn-{model_size}.npz"))
     for model_size in _allowable_model_sizes
 }
 
-
-def _squared_mahalanobis_distance(x: np.ndarray) -> np.ndarray:
+def _squared_mahalanobis_distance(x: torch.Tensor) -> torch.Tensor:
     """
     Computes the squared Mahalanobis distance of a set of points from the training data.
 
@@ -54,9 +119,24 @@ def _squared_mahalanobis_distance(x: np.ndarray) -> np.ndarray:
         The squared Mahalanobis distance. Shape: (N_cases,)
     """
     d = _scaled_input_distribution
-    mean = np.reshape(d["mean_inputs_scaled"], (1, -1))
-    x_minus_mean = (x.T - mean.T).T
-    return np.sum(x_minus_mean @ d["inv_cov_inputs_scaled"] * x_minus_mean, axis=1)
+    
+    # Convert distribution parameters to tensors and move to same device as input
+    device = x.device
+    mean = torch.tensor(d["mean_inputs_scaled"], dtype=torch.float32, device=device).reshape(1, -1)
+    inv_cov = torch.tensor(d["inv_cov_inputs_scaled"], dtype=torch.float32, device=device)
+    
+    # Calculate x - μ
+    x_minus_mean = x - mean
+    
+    # Calculate (x - μ)ᵀ Σ⁻¹ (x - μ)
+    # First multiply by inv_cov, then multiply element-wise and sum
+    mahal_dist = torch.sum(
+        torch.mm(x_minus_mean, inv_cov) * x_minus_mean,
+        dim=1
+    )
+    
+    return mahal_dist
+
 
 
 def get_aero_from_kulfan_parameters(
@@ -67,6 +147,7 @@ def get_aero_from_kulfan_parameters(
     xtr_upper: Union[float, np.ndarray] = 1.0,
     xtr_lower: Union[float, np.ndarray] = 1.0,
     model_size="large",
+    device='cpu',
 ) -> dict[str, Union[float, np.ndarray]]:
     """
     Computes aerodynamic coefficients and boundary layer parameters for an aerodynamics case.
@@ -153,7 +234,6 @@ def get_aero_from_kulfan_parameters(
         raise ValueError(
             f"Invalid {model_size=}. Must be one of {_allowable_model_sizes}."
         )
-    nn_params: dict[str, np.ndarray] = _nn_parameters[model_size]
 
     ### Prepare the inputs for the neural network
     input_rows: List[Union[float, np.ndarray]] = [
@@ -188,120 +268,86 @@ def get_aero_from_kulfan_parameters(
 
     x = np.stack(input_rows, axis=1)  # shape: (N_cases, N_inputs)
     ##### Evaluate the neural network
+    x = torch.tensor(x, dtype=torch.float32, device=device)
+    net = _neural_nets[model_size]
+    with torch.no_grad():
+        if net.device != device:
+            net.to(device)
 
-    ### First, determine what the structure of the neural network is (i.e., how many layers it has) by looking at the keys.
-    # These keys come from the dictionary of saved weights/biases for the specified neural network.
-    try:
-        layer_indices: Set[int] = set(
-            [int(key.split(".")[1]) for key in nn_params.keys()]
+        y = net(x)  # N_outputs x N_cases
+
+        y[:, 0] = y[:, 0] - _squared_mahalanobis_distance(x) / (
+            2 * _scaled_input_distribution["N_inputs"]
         )
-    except TypeError:
-        raise ValueError(
-            f"Got an unexpected neural network file format.\n"
-            f"Dictionary keys should be strings of the form 'net.0.weight', 'net.0.bias', 'net.2.weight', etc.'.\n"
-            f"Instead, got keys of the form {nn_params.keys()}.\n"
+        # This was baked into training in order to ensure the network asymptotes to zero analysis confidence far away from the training data.
+
+        ### Then, flip the inputs and evaluate the network again.
+        # The goal here is to embed the invariant of "symmetry across alpha" into the network evaluation.
+        # (This was also performed during training, so the network is "intended" to be evaluated this way.)
+
+        x_flipped = (
+            x + 0.0
+        )  # This is an array-api-agnostic way to force a memory copy of the array to be made.
+        x_flipped[:, :8] = (
+            x[:, 8:16] * -1
+        )  # switch kulfan_lower with a flipped kulfan_upper
+        x_flipped[:, 8:16] = (
+            x[:, :8] * -1
+        )  # switch kulfan_upper with a flipped kulfan_lower
+        x_flipped[:, 16] = -1 * x[:, 16]  # flip kulfan_LE_weight
+        x_flipped[:, 18] = -1 * x[:, 18]  # flip sin(2a)
+        x_flipped[:, 23] = x[:, 24]  # flip xtr_upper with xtr_lower
+        x_flipped[:, 24] = x[:, 23]  # flip xtr_lower with xtr_upper
+
+        y_flipped = net(x_flipped)
+        y_flipped[:, 0] = y_flipped[:, 0] - _squared_mahalanobis_distance(x_flipped) / (
+            2 * _scaled_input_distribution["N_inputs"]
         )
-    layer_indices: List[int] = sorted(list(layer_indices))
+        # This was baked into training in order to ensure the network asymptotes to zero analysis confidence far away from the training data.
 
-    ### Now, set up evaluation of the basic neural network.
-    def net(x: np.ndarray) -> np.ndarray:
-        """
-        Evaluates the raw network (taking in scaled inputs and returning scaled outputs).
+        ### The resulting outputs will also be flipped, so we need to flip them back to their normal orientation
+        y_unflipped = (
+            y_flipped + 0.0
+        )  # This is an array-api-agnostic way to force a memory copy of the array to be made.
+        y_unflipped[:, 1] = y_flipped[:, 1] * -1  # CL
+        y_unflipped[:, 3] = y_flipped[:, 3] * -1  # CM
+        y_unflipped[:, 4] = y_flipped[:, 5]  # switch Top_Xtr with Bot_Xtr
+        y_unflipped[:, 5] = y_flipped[:, 4]  # switch Bot_Xtr with Top_Xtr
 
-        Works in the input and output latent spaces.
+        # switch upper and lower Ret, H
+        y_unflipped[:, 6 : 6 + 32 * 2] = y_flipped[:, 6 + 32 * 3 : 6 + 32 * 5]
+        y_unflipped[:, 6 + 32 * 3 : 6 + 32 * 5] = y_flipped[:, 6 : 6 + 32 * 2]
 
-        Input `x` shape: (N_cases, N_inputs)
-        Output `y` shape: (N_cases, N_outputs)
-        """
-        x = np.transpose(x)
-        layer_indices_to_iterate = layer_indices.copy()
+        # switch upper_bl_ue/vinf with lower_bl_ue/vinf
+        y_unflipped[:, 6 + 32 * 2 : 6 + 32 * 3] = -1 * y_flipped[:, 6 + 32 * 5 : 6 + 32 * 6]
+        y_unflipped[:, 6 + 32 * 5 : 6 + 32 * 6] = -1 * y_flipped[:, 6 + 32 * 2 : 6 + 32 * 3]
 
-        while len(layer_indices_to_iterate) != 0:
-            i = layer_indices_to_iterate.pop(0)
-            w = nn_params[f"net.{i}.weight"]
-            b = nn_params[f"net.{i}.bias"]
-            x = w @ x + np.reshape(b, (-1, 1))
-
-            if (
-                len(layer_indices_to_iterate) != 0
-            ):  # Don't apply the activation function on the last layer
-                x = np.swish(x)
-        x = np.transpose(x)
-        return x
-
-    y = net(x)  # N_outputs x N_cases
-    y[:, 0] = y[:, 0] - _squared_mahalanobis_distance(x) / (
-        2 * _scaled_input_distribution["N_inputs"]
-    )
-    # This was baked into training in order to ensure the network asymptotes to zero analysis confidence far away from the training data.
-
-    ### Then, flip the inputs and evaluate the network again.
-    # The goal here is to embed the invariant of "symmetry across alpha" into the network evaluation.
-    # (This was also performed during training, so the network is "intended" to be evaluated this way.)
-
-    x_flipped = (
-        x + 0.0
-    )  # This is an array-api-agnostic way to force a memory copy of the array to be made.
-    x_flipped[:, :8] = (
-        x[:, 8:16] * -1
-    )  # switch kulfan_lower with a flipped kulfan_upper
-    x_flipped[:, 8:16] = (
-        x[:, :8] * -1
-    )  # switch kulfan_upper with a flipped kulfan_lower
-    x_flipped[:, 16] = -1 * x[:, 16]  # flip kulfan_LE_weight
-    x_flipped[:, 18] = -1 * x[:, 18]  # flip sin(2a)
-    x_flipped[:, 23] = x[:, 24]  # flip xtr_upper with xtr_lower
-    x_flipped[:, 24] = x[:, 23]  # flip xtr_lower with xtr_upper
-
-    y_flipped = net(x_flipped)
-    y_flipped[:, 0] = y_flipped[:, 0] - _squared_mahalanobis_distance(x_flipped) / (
-        2 * _scaled_input_distribution["N_inputs"]
-    )
-    # This was baked into training in order to ensure the network asymptotes to zero analysis confidence far away from the training data.
-
-    ### The resulting outputs will also be flipped, so we need to flip them back to their normal orientation
-    y_unflipped = (
-        y_flipped + 0.0
-    )  # This is an array-api-agnostic way to force a memory copy of the array to be made.
-    y_unflipped[:, 1] = y_flipped[:, 1] * -1  # CL
-    y_unflipped[:, 3] = y_flipped[:, 3] * -1  # CM
-    y_unflipped[:, 4] = y_flipped[:, 5]  # switch Top_Xtr with Bot_Xtr
-    y_unflipped[:, 5] = y_flipped[:, 4]  # switch Bot_Xtr with Top_Xtr
-
-    # switch upper and lower Ret, H
-    y_unflipped[:, 6 : 6 + 32 * 2] = y_flipped[:, 6 + 32 * 3 : 6 + 32 * 5]
-    y_unflipped[:, 6 + 32 * 3 : 6 + 32 * 5] = y_flipped[:, 6 : 6 + 32 * 2]
-
-    # switch upper_bl_ue/vinf with lower_bl_ue/vinf
-    y_unflipped[:, 6 + 32 * 2 : 6 + 32 * 3] = -1 * y_flipped[:, 6 + 32 * 5 : 6 + 32 * 6]
-    y_unflipped[:, 6 + 32 * 5 : 6 + 32 * 6] = -1 * y_flipped[:, 6 + 32 * 2 : 6 + 32 * 3]
-
-    ### Then, average the two outputs to get the "symmetric" result
-    y_fused = (y + y_unflipped) / 2
-    y_fused[:, 0] = _sigmoid(y_fused[:, 0])  # Analysis confidence, a binary variable
-    y_fused[:, 4] = np.clip(y_fused[:, 4], 0, 1)  # Top_Xtr
-    y_fused[:, 5] = np.clip(y_fused[:, 5], 0, 1)  # Bot_Xtr
+        ### Then, average the two outputs to get the "symmetric" result
+        y_fused = (y + y_unflipped) / 2
+        y_fused[:, 0] = torch.sigmoid(y_fused[:, 0])
+        y_fused[:, 4] = torch.clamp(y_fused[:, 4], 0, 1)
+        y_fused[:, 5] = torch.clamp(y_fused[:, 5], 0, 1)
 
     ### Unpack outputs
     analysis_confidence = y_fused[:, 0]
     CL = y_fused[:, 1] / 2
-    CD = np.exp((y_fused[:, 2] - 2) * 2)
+    CD = torch.exp((y_fused[:, 2] - 2) * 2)
     CM = y_fused[:, 3] / 20
     Top_Xtr = y_fused[:, 4]
     Bot_Xtr = y_fused[:, 5]
 
     upper_bl_ue_over_vinf = y_fused[:, 6 + Data.N * 2 : 6 + Data.N * 3]
     lower_bl_ue_over_vinf = y_fused[:, 6 + Data.N * 5 : 6 + Data.N * 6]
-
+    Re = torch.tensor(Re, dtype=torch.float32, device=device).reshape(-1, 1)
     upper_theta = ((10 ** y_fused[:, 6 : 6 + Data.N]) - 0.1) / (
-        np.abs(upper_bl_ue_over_vinf) * np.reshape(Re, (-1, 1))
+        torch.abs(upper_bl_ue_over_vinf) * Re # torch.reshape(Re, (-1, 1))
     )
-    upper_H = 2.6 * np.exp(y_fused[:, 6 + Data.N : 6 + Data.N * 2])
+    upper_H = 2.6 * torch.exp(y_fused[:, 6 + Data.N : 6 + Data.N * 2])
 
     lower_theta = ((10 ** y_fused[:, 6 + Data.N * 3 : 6 + Data.N * 4]) - 0.1) / (
-        np.abs(lower_bl_ue_over_vinf) * np.reshape(Re, (-1, 1))
+        torch.abs(lower_bl_ue_over_vinf) * Re # torch.reshape(Re, (-1, 1))
     )
-    lower_H = 2.6 * np.exp(y_fused[:, 6 + Data.N * 4 : 6 + Data.N * 5])
+    lower_H = 2.6 * torch.exp(y_fused[:, 6 + Data.N * 4 : 6 + Data.N * 5])
 
     results = {
         "analysis_confidence": analysis_confidence,
@@ -317,7 +363,7 @@ def get_aero_from_kulfan_parameters(
         **{f"lower_bl_H_{i}": lower_H[:, i] for i in range(Data.N)},
         **{f"lower_bl_ue/vinf_{i}": lower_bl_ue_over_vinf[:, i] for i in range(Data.N)},
     }
-    return {key: np.reshape(value, -1) for key, value in results.items()}
+    return {key: np.reshape(value.cpu().numpy(), -1) for key, value in results.items()}
 
 
 def get_aero_from_airfoil(
@@ -328,6 +374,7 @@ def get_aero_from_airfoil(
     xtr_upper: Union[float, np.ndarray] = 1.0,
     xtr_lower: Union[float, np.ndarray] = 1.0,
     model_size="large",
+    device='cpu',
 ) -> Dict[str, Union[float, np.ndarray]]:
     """
     Computes aerodynamic coefficients and boundary layer parameters for an aerodynamics case.
@@ -367,6 +414,7 @@ def get_aero_from_airfoil(
         xtr_upper=xtr_upper,
         xtr_lower=xtr_lower,
         model_size=model_size,
+        device=device
     )
 
     ### Correct the force vectors and lift-induced moment from translation
@@ -384,6 +432,7 @@ def get_aero_from_coordinates(
     xtr_upper: Union[float, np.ndarray] = 1.0,
     xtr_lower: Union[float, np.ndarray] = 1.0,
     model_size="large",
+    device='cpu',
 ):
     """
     Computes aerodynamic coefficients and boundary layer parameters for an aerodynamics case.
@@ -410,6 +459,7 @@ def get_aero_from_coordinates(
         xtr_upper=xtr_upper,
         xtr_lower=xtr_lower,
         model_size=model_size,
+        device=device
     )
 
 
@@ -421,6 +471,7 @@ def get_aero_from_dat_file(
     xtr_upper: Union[float, np.ndarray] = 1.0,
     xtr_lower: Union[float, np.ndarray] = 1.0,
     model_size="large",
+    device='cpu',
 ):
     """
     Computes aerodynamic coefficients and boundary layer parameters for an aerodynamics case.
@@ -452,6 +503,7 @@ def get_aero_from_dat_file(
         xtr_upper=xtr_upper,
         xtr_lower=xtr_lower,
         model_size=model_size,
+        device=device
     )
 
 
