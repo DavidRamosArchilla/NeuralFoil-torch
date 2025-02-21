@@ -1,3 +1,6 @@
+>  This a fork of Neuralfoil to give support on GPU by using torch.
+-----
+
 <p align="center">
     <img src="./media/neuralfoil_logo.svg" width="800" />
 </p>
