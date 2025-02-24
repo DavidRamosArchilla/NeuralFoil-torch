@@ -1,5 +1,5 @@
-> This a fork of Neuralfoil to give support on GPU by using torch.
-> GPU does not seems to make neuralfoil faster, but torch does. Moreover, if the number of threads is set to 1 with `torch.set_num_threads(1)` it works a bit faster
+> This a fork of Neuralfoil that uses torch instead of numpy for neural net predictions.
+> It has GPU but it does not seems to make neuralfoil faster, but torch does. Moreover, if the number of threads is set to 1 with `torch.set_num_threads(1)` it works a bit faster
 -----
 
 <p align="center">
@@ -70,18 +70,21 @@ aero = nf.get_aero_from_dat_file(  # You can use a .dat file as an entry point
     alpha=5,  # Angle of attack [deg]
     Re=5e6,  # Reynolds number [-]
     model_size="xlarge",  # Optionally, specify your model size.
+    device='cpu' # or 'cuda' for gpu
 )
 
 aero = nf.get_aero_from_coordinates(  # You can use xy airfoil coordinates as an entry point
     coordinates=n_by_2_numpy_ndarray_of_airfoil_coordinates,
     alpha=np.linspace(-25, 25, 1000),  # Vectorize your evaluations across `alpha` and `Re`
     Re=5e6,
+    device='cpu' # or 'cuda' for gpu
 )
 
 import aerosandbox as asb  # `pip install aerosandbox`
 aero = nf.get_aero_from_airfoil(  # You can use AeroSandbox airfoils as an entry point
     airfoil=asb.Airfoil("naca4412"),  # any UIUC or NACA airfoil name works
     alpha=5, Re=5e6,
+    device='cpu' # or 'cuda' for gpu
 )
 
 # `aero` is a dictionary with keys: ["analysis_confidence", "CL", "CD", "CM", "Top_Xtr", "Bot_Xtr", ...]
