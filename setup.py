@@ -35,7 +35,7 @@ def get_version(rel_path):
 
 ### Do the setup
 setup(
-    name="NeuralFoil-torch",
+    name="neuralFoil-torch",
     author="David Ramos, Peter Sharpe",
     version=get_version("neuralfoil/__init__.py"),
     description="NeuralFoil-torch a fork of Neuralfoil that uses torch instead of numpy for faster neural net predictions.",
