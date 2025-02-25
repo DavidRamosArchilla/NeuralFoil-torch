@@ -35,14 +35,14 @@ def get_version(rel_path):
 
 ### Do the setup
 setup(
-    name="NeuralFoil",
-    author="Peter Sharpe",
+    name="NeuralFoil-torch",
+    author="David Ramos, Peter Sharpe",
     version=get_version("neuralfoil/__init__.py"),
-    description="NeuralFoil is an airfoil aerodynamics analysis tool using physics-informed machine learning, in pure Python/NumPy.",
+    description="NeuralFoil-torch a fork of Neuralfoil that uses torch instead of numpy for faster neural net predictions.",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/peterdsharpe/NeuralFoil",
-    author_email="pds@mit.edu",
+    url="https://github.com/DavidRamosArchilla/NeuralFoil-torch",
+    # author_email="pds@mit.edu",
     classifiers=[
         "Development Status :: 5 - Production/Stable",
         "Intended Audience :: Science/Research",
@@ -55,7 +55,7 @@ setup(
         "neuralfoil"
     ],  # find_packages(exclude=['docs', 'media', 'examples', 'studies'])
     python_requires=">=3.9",
-    install_requires=["numpy >= 1", "aerosandbox >= 4.2.4, <4.3.0"],
+    install_requires=["numpy >= 1", "torch", "aerosandbox >= 4.2.4, <4.3.0"],
     extras_require={
         "training": ["torch", "ray", "polars", "tqdm"],
         "test": ["pytest", "nbval"],
@@ -72,7 +72,7 @@ setup(
         ],  # include the weights and biases for the neural networks
     },
     project_urls={  # Optional
-        "Source": "https://github.com/peterdsharpe/NeuralFoil",
-        "Bug Reports": "https://github.com/peterdsharpe/NeuralFoil/issues",
+        "Source": "https://github.com/DavidRamosArchilla/NeuralFoil-torch",
+        "Bug Reports": "https://github.com/DavidRamosArchilla/NeuralFoil-torch/issues",
     },
 )
