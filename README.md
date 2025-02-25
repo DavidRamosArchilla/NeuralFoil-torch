@@ -1,5 +1,6 @@
-> This a fork of Neuralfoil that uses torch instead of numpy for neural net predictions.
-> It has GPU but it does not seems to make neuralfoil faster, but torch does. Moreover, if the number of threads is set to 1 with `torch.set_num_threads(1)` it works a bit faster
+> This a fork of Neuralfoil that uses torch instead of numpy for neural net predictions.  
+> It has GPU but it does not seems to make neuralfoil faster, but torch does. Moreover, if the number of threads is set to 1 with `torch.set_num_threads(1)` it works a bit faster.  
+> The interface is kept the same, so it can be used with areosandbox without a problem (but only on cpu as it is the default device)
 -----
 
 <p align="center">
