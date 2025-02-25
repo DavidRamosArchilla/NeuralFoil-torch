@@ -26,7 +26,7 @@ A unique feature is that NeuralFoil also assesses its own trustworthiness, yield
 NeuralFoil is [~30x faster than XFoil for a single analysis, and ~1000x faster for multipoint analysis](#speed), all with [minimal loss in accuracy compared to XFoil](#accuracy). Due to the diversity of training data and the embedding of several physics-based invariants, [this accuracy is seen even on out-of-distribution airfoils](#accuracy) (i.e., airfoils it wasn't trained on). More comparisons to XFoil are [here](#xfoil-benefit-question). NeuralFoil aims to be lightweight, with [minimal dependencies](#dependencies-question) and a [small and easily-understood code-base](./neuralfoil/gen2_5_architecture/main.py) (<500 lines of user-facing code).
 
 ```
-pip install neuralfoil
+pip install neuralFoil-torch
 ```
 
 ![input-output diagram](./media/io_diagram/neuralfoil_io.png)
